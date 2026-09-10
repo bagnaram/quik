@@ -375,6 +375,7 @@ class ConversationRepositoryImpl @Inject constructor(
                         conversation,
                         realm.where(Message::class.java)
                             .equalTo("threadId", conversation.id)
+                            .equalTo("junk", false)
                             .sort("date", Sort.DESCENDING)
                             .findFirst()
                     )
@@ -527,6 +528,7 @@ class ConversationRepositoryImpl @Inject constructor(
 
                             lastMessage = realm.where(Message::class.java)
                                 .equalTo("threadId", threadId)
+                                .equalTo("junk", false)
                                 .sort("date", Sort.DESCENDING)
                                 .findFirst()
                         }
