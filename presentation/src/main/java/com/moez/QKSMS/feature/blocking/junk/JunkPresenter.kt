@@ -51,6 +51,9 @@ class JunkPresenter @Inject constructor(
                                     .toSet()
                             }
                             messageRepo.restoreJunk(ids)
+                            threadIds.forEach { threadId ->
+                                conversationRepo.getOrCreateConversation(threadId)
+                            }
                             if (threadIds.isNotEmpty()) conversationRepo.updateConversations(threadIds)
                         }
                         view.clearSelection()
