@@ -30,8 +30,10 @@ import io.reactivex.schedulers.Schedulers
 import org.json.JSONArray
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import javax.inject.Inject
 
 class MessageContentFiltersPresenter @Inject constructor(
@@ -123,18 +125,27 @@ class MessageContentFiltersPresenter @Inject constructor(
         }
     }
 
-    private fun regexIsSafe(value: String): Boolean {
-        val executor = Executors.newSingleThreadExecutor()
-        return try {
-            val opts = setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
-            val regex = Regex(value, opts)
-            val future = executor.submit(Callable { regex.containsMatchIn(REDOS_PROBE) })
-            future.get(REDOS_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            true
+    private enum class ProbeResult { Ok, Unsafe, Timeout }
+
+    // java.util.regex does not honour thread interrupts, so a runaway
+    // backtrack keeps its executor thread pinned even after cancel(true).
+    // Reuse one executor for the whole import; on timeout, orphan it and
+    // spin up a fresh one for the next probe.
+    private fun probeRegex(executor: ExecutorService, value: String): ProbeResult {
+        val regex = try {
+            Regex(value, setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
         } catch (t: Throwable) {
-            false
-        } finally {
-            executor.shutdownNow()
+            return ProbeResult.Unsafe
+        }
+        val future = executor.submit(Callable { regex.containsMatchIn(REDOS_PROBE) })
+        return try {
+            future.get(REDOS_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            ProbeResult.Ok
+        } catch (t: TimeoutException) {
+            future.cancel(true)
+            ProbeResult.Timeout
+        } catch (t: Throwable) {
+            ProbeResult.Unsafe
         }
     }
 
@@ -151,35 +162,54 @@ class MessageContentFiltersPresenter @Inject constructor(
         var skipped = 0
         val regexErrors = mutableListOf<String>()
         val entries = minOf(array.length(), MAX_ENTRIES)
-        for (i in 0 until entries) {
-            val entry = array.optJSONObject(i)
-            if (entry == null) {
-                skipped++
-                continue
-            }
-            val action = entry.optString("action", "")
-            val phrase = entry.optString("phrase", "")
-            if (action != "junk" || phrase.isBlank() || phrase.length > MAX_PHRASE_LEN) {
-                skipped++
-                continue
-            }
-            val useRegex = entry.optBoolean("useRegex", false)
-            val caseSensitive = entry.optBoolean("caseSensitive", false) && !useRegex
-            val value = if (useRegex) phrase else phrase.trim()
-            if (useRegex && !regexIsSafe(value)) {
-                regexErrors.add(value)
-                skipped++
-                continue
-            }
-            filterRepo.createFilter(
-                MessageContentFilterData(
-                    value = value,
-                    caseSensitive = caseSensitive,
-                    isRegex = useRegex,
-                    includeContacts = false
+        var probeExecutor: ExecutorService? = null
+        try {
+            for (i in 0 until entries) {
+                val entry = array.optJSONObject(i)
+                if (entry == null) {
+                    skipped++
+                    continue
+                }
+                val action = entry.optString("action", "")
+                val phrase = entry.optString("phrase", "")
+                if (action != "junk" || phrase.isBlank() || phrase.length > MAX_PHRASE_LEN) {
+                    skipped++
+                    continue
+                }
+                val useRegex = entry.optBoolean("useRegex", false)
+                val caseSensitive = entry.optBoolean("caseSensitive", false) && !useRegex
+                val value = if (useRegex) phrase else phrase.trim()
+                if (useRegex) {
+                    val executor = probeExecutor
+                        ?: Executors.newSingleThreadExecutor().also { probeExecutor = it }
+                    when (probeRegex(executor, value)) {
+                        ProbeResult.Ok -> Unit
+                        ProbeResult.Unsafe -> {
+                            regexErrors.add(value)
+                            skipped++
+                            continue
+                        }
+                        ProbeResult.Timeout -> {
+                            executor.shutdownNow()
+                            probeExecutor = null
+                            regexErrors.add(value)
+                            skipped++
+                            continue
+                        }
+                    }
+                }
+                filterRepo.createFilter(
+                    MessageContentFilterData(
+                        value = value,
+                        caseSensitive = caseSensitive,
+                        isRegex = useRegex,
+                        includeContacts = false
+                    )
                 )
-            )
-            imported++
+                imported++
+            }
+        } finally {
+            probeExecutor?.shutdownNow()
         }
         return ImportResult.Success(imported, skipped, regexErrors)
     }

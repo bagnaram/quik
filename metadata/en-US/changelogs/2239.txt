@@ -1,5 +1,0 @@
-# What's Changed
-- New Junk screen (Settings > Blocking > Junk) to quarantine messages caught by content filters instead of dropping them, when Drop is off
-- Import content filters from JSON
-- Fix regex filters not matching anywhere in message body
-- Regex filters now honor case-sensitive flag

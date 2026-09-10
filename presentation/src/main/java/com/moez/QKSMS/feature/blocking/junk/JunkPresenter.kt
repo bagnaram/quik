@@ -14,11 +14,14 @@ import com.uber.autodispose.android.lifecycle.scope
 import com.uber.autodispose.autoDisposable
 import dev.octoshrimpy.quik.R
 import dev.octoshrimpy.quik.common.base.QkPresenter
+import dev.octoshrimpy.quik.extensions.anyOf
+import dev.octoshrimpy.quik.model.Message
 import dev.octoshrimpy.quik.repository.ConversationRepository
 import dev.octoshrimpy.quik.repository.MessageRepository
 import io.reactivex.android.schedulers.AndroidSchedulers
 import io.reactivex.rxkotlin.withLatestFrom
 import io.reactivex.schedulers.Schedulers
+import io.realm.Realm
 import javax.inject.Inject
 
 class JunkPresenter @Inject constructor(
@@ -40,7 +43,13 @@ class JunkPresenter @Inject constructor(
                 when (itemId) {
                     R.id.restore -> {
                         Schedulers.io().scheduleDirect {
-                            val threadIds = messageRepo.getMessages(ids).map { it.threadId }.toSet()
+                            val threadIds = Realm.getDefaultInstance().use { realm ->
+                                realm.where(Message::class.java)
+                                    .anyOf("id", ids.toLongArray())
+                                    .findAll()
+                                    .map { it.threadId }
+                                    .toSet()
+                            }
                             messageRepo.restoreJunk(ids)
                             if (threadIds.isNotEmpty()) conversationRepo.updateConversations(threadIds)
                         }
